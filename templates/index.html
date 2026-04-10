@@ -1,0 +1,80 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>{{ title }}</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 1100px; margin: 24px auto; padding: 0 12px; color: #111; }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 18px; margin-bottom: 18px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    label { display:block; font-weight:600; margin-bottom:6px; }
+    input { width:100%; padding:10px; box-sizing:border-box; border:1px solid #ccc; border-radius:8px; }
+    button { padding:10px 14px; border:none; border-radius:8px; background:#111; color:#fff; cursor:pointer; }
+    button:hover { opacity:0.9; }
+    table { width:100%; border-collapse: collapse; }
+    th, td { padding:12px 10px; border-bottom:1px solid #eee; text-align:left; }
+    a { color:#2563eb; text-decoration:none; }
+    .muted { color:#666; }
+  </style>
+</head>
+<body>
+  <h1>Quest Tracker</h1>
+
+  <div class="card">
+    <h2>Create Quest</h2>
+    <form action="/quest/create" method="post">
+      <div class="grid">
+        <div>
+          <label>Quest Name</label>
+          <input name="name" placeholder="Weekly Quest" required />
+        </div>
+        <div>
+          <label>Hashtag</label>
+          <input name="hashtag" placeholder="#OurVibesWeek" required />
+        </div>
+        <div>
+          <label>Start Date & Time (WIB)</label>
+          <input type="datetime-local" name="start_wib" required />
+        </div>
+        <div>
+          <label>End Date & Time (WIB)</label>
+          <input type="datetime-local" name="end_wib" required />
+        </div>
+      </div>
+      <div style="margin-top:14px;">
+        <button type="submit">Create Quest</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Quests</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Name</th>
+          <th>Hashtag</th>
+          <th>Window (WIB)</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for q in quests %}
+        <tr>
+          <td>{{ q.id }}</td>
+          <td>{{ q.name }}</td>
+          <td>{{ q.hashtag }}</td>
+          <td>{{ q.start_display }} → {{ q.end_display }}</td>
+          <td><a href="/quest/{{ q.id }}">Open</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <p class="muted">
+    Fixed channel is already configured in backend. Make sure <b>DISCORD_BOT_TOKEN</b> is set before sync.
+  </p>
+</body>
+</html>

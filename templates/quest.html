@@ -1,0 +1,154 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>{{ title }}</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 1250px; margin: 24px auto; padding: 0 12px; color:#111; }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 18px; margin-bottom: 18px; }
+    .actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:12px; }
+    button { padding:10px 14px; border:none; border-radius:8px; background:#111; color:#fff; cursor:pointer; }
+    button:hover { opacity:0.92; }
+    .btn-secondary { background:#2563eb; }
+    .btn-warning { background:#d97706; }
+    .btn-danger { background:#dc2626; }
+    table { width:100%; border-collapse: collapse; margin-top:10px; }
+    th, td { padding:10px; border-bottom:1px solid #eee; text-align:left; white-space:nowrap; }
+    a { color:#2563eb; text-decoration:none; }
+    .muted { color:#666; }
+    .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+    select, input { width:100%; padding:10px; box-sizing:border-box; border:1px solid #ccc; border-radius:8px; }
+    label { display:block; font-weight:600; margin-bottom:6px; }
+    .summary { background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:12px; margin-top:12px; }
+  </style>
+</head>
+<body>
+  <p><a href="/">← Back to Quest List</a></p>
+
+  <div class="card">
+    <h1>{{ quest.name }}</h1>
+    <p class="muted">
+      Hashtag: <b>{{ quest.hashtag }}</b><br/>
+      Window: <b>{{ quest.start_display }}</b> → <b>{{ quest.end_display }}</b>
+    </p>
+
+    <div class="actions">
+      <form action="/quest/{{ quest.id }}/sync" method="post">
+        <button type="submit" class="btn-secondary">Sync from Discord</button>
+      </form>
+
+      <a href="/quest/{{ quest.id }}/export.csv">
+        <button type="button">Export CSV</button>
+      </a>
+
+      <form action="/quest/{{ quest.id }}/clear-sync" method="post" onsubmit="return confirm('Clear all synced check-in data for this quest?')">
+        <button type="submit" class="btn-warning">Clear Sync Data</button>
+      </form>
+
+      <form action="/quest/{{ quest.id }}/delete" method="post" onsubmit="return confirm('Delete this quest and all its sync history?')">
+        <button type="submit" class="btn-danger">Delete Quest</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Role Distribution</h2>
+
+    {% if role_error %}
+      <p class="muted">Failed to load roles: {{ role_error }}</p>
+    {% else %}
+      <form action="/quest/{{ quest.id }}/assign-role" method="post">
+        <div class="grid-2">
+          <div>
+            <label>Select Role</label>
+            <select name="role_id" required>
+              <option value="">-- Select Role --</option>
+              {% for role in roles %}
+                <option value="{{ role.id }}">{{ role.name }} ({{ role.id }})</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div>
+            <label>Minimum Points</label>
+            <input type="number" name="min_points" min="1" value="1" required />
+          </div>
+        </div>
+
+        <div style="margin-top:14px;">
+          <button type="submit">Assign Role</button>
+        </div>
+      </form>
+    {% endif %}
+
+    {% if assign_summary %}
+      <div class="summary">
+        <p><b>Role assignment finished.</b></p>
+        <p>Eligible: {{ assign_summary.eligible_count }}</p>
+        <p>Success: {{ assign_summary.success_count }}</p>
+        <p>Failed: {{ assign_summary.failed_count }}</p>
+
+        {% if assign_summary.failed_count > 0 %}
+          <table>
+            <thead>
+              <tr>
+                <th>Username</th>
+                <th>User ID</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for item in assign_summary.failed %}
+              <tr>
+                <td>{{ item.username }}</td>
+                <td>{{ item.user_id }}</td>
+                <td>{{ item.reason }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% endif %}
+      </div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Leaderboard</h2>
+
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>User</th>
+          {% for i in range(1, total_days + 1) %}
+            <th>Day {{ i }}</th>
+          {% endfor %}
+          <th>Points</th>
+          <th>Current Streak</th>
+          <th>Max Streak</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in leaderboard %}
+        <tr>
+          <td>{{ loop.index }}</td>
+          <td>
+            <div><b>{{ row.username }}</b></div>
+            <div class="muted">{{ row.user_id }}</div>
+          </td>
+          {% for cell in row.grid %}
+            <td>{{ cell }}</td>
+          {% endfor %}
+          <td><b>{{ row.points }}</b></td>
+          <td>{{ row.current_streak }}</td>
+          <td>{{ row.max_streak }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    {% if leaderboard|length == 0 %}
+      <p class="muted">No sync data yet.</p>
+    {% endif %}
+  </div>
+</body>
+</html>
