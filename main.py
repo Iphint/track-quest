@@ -11,6 +11,13 @@ from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
+def safe(v):
+    if isinstance(v, dict):
+        return str(v)
+    if isinstance(v, list):
+        return ", ".join(map(str, v))
+    return v
+
 APP_TITLE = "Discord Quest Tracker"
 DB_PATH = os.getenv("QUEST_DB_PATH", "quest_tracker.db")
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
@@ -290,12 +297,19 @@ async def fetch_assignable_roles():
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
+    print("ROUTE HIT", flush=True)
+
     conn = db()
     quests = conn.execute("SELECT * FROM quests ORDER BY id DESC").fetchall()
     conn.close()
 
+    print(f"TOTAL ROWS: {len(quests)}", flush=True)
+
     quest_rows = []
+
     for q in quests:
+        print("RAW ROW:", dict(q), flush=True)
+
         quest_rows.append({
             "id": q["id"],
             "name": q["name"],
@@ -303,6 +317,11 @@ def index(request: Request):
             "start_display": format_wib_display(q["start_wib"]),
             "end_display": format_wib_display(q["end_wib"]),
         })
+
+    for q in quest_rows:
+        print("CLEAN ROW:", q, flush=True)
+        print("TYPE NAME:", type(q["name"]), q["name"], flush=True)
+        print("TYPE HASHTAG:", type(q["hashtag"]), q["hashtag"], flush=True)
 
     return templates.TemplateResponse("index.html", {
         "request": request,
