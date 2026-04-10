@@ -4,7 +4,7 @@ import csv
 import sqlite3
 from io import StringIO
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any
+from typing import Optional
 
 import httpx
 from fastapi import FastAPI, Request, Form
@@ -137,23 +137,7 @@ def compute_streaks(total_days: int, day_map: dict[int, bool]) -> tuple[int, int
 
     return current_streak, max_streak
 
-
-# async def discord_get(url: str, params: dict | None = None):
-#     if not DISCORD_BOT_TOKEN:
-#         raise RuntimeError("DISCORD_BOT_TOKEN is missing.")
-
-#     headers = {
-#         "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
-#         "User-Agent": "QuestTracker/1.0"
-#     }
-
-#     async with httpx.AsyncClient(timeout=30) as client:
-#         r = await client.get(url, headers=headers, params=params)
-#         r.raise_for_status()
-#         return r.json()
-
-
-async def discord_get(url: str, params: Optional[Dict[str, Any]] = None):
+async def discord_get(url: str, params: dict = None):
     if not DISCORD_BOT_TOKEN:
         raise RuntimeError("DISCORD_BOT_TOKEN is missing.")
 
