@@ -2,22 +2,19 @@ import os
 import re
 import csv
 import sqlite3
+import asyncio
 from io import StringIO
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Dict, List, Tuple
 
 import httpx
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
-def safe(v):
-    if isinstance(v, dict):
-        return str(v)
-    if isinstance(v, list):
-        return ", ".join(map(str, v))
-    return v
-
+# ============================================================================
+# CONSTANTS
+# ============================================================================
 APP_TITLE = "Discord Quest Tracker"
 DB_PATH = os.getenv("QUEST_DB_PATH", "quest_tracker.db")
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
@@ -31,57 +28,80 @@ GUILD_ID = "1399389887144263690"
 # WIB fixed offset
 WIB = timezone(timedelta(hours=7))
 
-
+# ============================================================================
+# APP INITIALIZATION
+# ============================================================================
 app = FastAPI(title=APP_TITLE)
 templates = Jinja2Templates(directory="templates")
 
 
-def db():
+# ============================================================================
+# DATABASE HELPERS
+# ============================================================================
+def get_db_connection() -> sqlite3.Connection:
+    """Create a new database connection with row factory enabled."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 
-def init_db():
-    conn = db()
-    cur = conn.cursor()
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS quests (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        hashtag TEXT NOT NULL,
-        start_wib TEXT NOT NULL,
-        end_wib TEXT NOT NULL,
-        created_at_utc TEXT NOT NULL
-    )
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS checkins (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        quest_id INTEGER NOT NULL,
-        user_id TEXT NOT NULL,
-        username TEXT NOT NULL,
-        day_index INTEGER NOT NULL,
-        message_id TEXT NOT NULL,
-        message_time_utc TEXT NOT NULL,
-        content TEXT NOT NULL,
-        FOREIGN KEY (quest_id) REFERENCES quests(id),
-        UNIQUE(quest_id, user_id, day_index)
-    )
-    """)
-
-    conn.commit()
-    conn.close()
+def close_db_connection(conn: Optional[sqlite3.Connection]) -> None:
+    """Safely close database connection."""
+    if conn:
+        try:
+            conn.close()
+        except Exception as e:
+            print(f"Warning: Failed to close DB connection: {e}")
 
 
+def init_db() -> None:
+    """Initialize database tables if they don't exist."""
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS quests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            hashtag TEXT NOT NULL,
+            start_wib TEXT NOT NULL,
+            end_wib TEXT NOT NULL,
+            created_at_utc TEXT NOT NULL
+        )
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS checkins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            quest_id INTEGER NOT NULL,
+            user_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            day_index INTEGER NOT NULL,
+            message_id TEXT NOT NULL,
+            message_time_utc TEXT NOT NULL,
+            content TEXT NOT NULL,
+            FOREIGN KEY (quest_id) REFERENCES quests(id),
+            UNIQUE(quest_id, user_id, day_index)
+        )
+        """)
+
+        conn.commit()
+    finally:
+        close_db_connection(conn)
+
+
+# Initialize database on startup
 init_db()
 
 
+# ============================================================================
+# DATETIME UTILITIES
+# ============================================================================
 def parse_wib_datetime(value: str) -> datetime:
     """
-    Expects HTML datetime-local format: YYYY-MM-DDTHH:MM
+    Parse HTML datetime-local format: YYYY-MM-DDTHH:MM
+    Returns datetime with WIB timezone.
     """
     dt = datetime.fromisoformat(value)
     if dt.tzinfo is None:
@@ -90,33 +110,65 @@ def parse_wib_datetime(value: str) -> datetime:
 
 
 def format_wib_display(iso_str: str) -> str:
-    dt = datetime.fromisoformat(iso_str).astimezone(WIB)
-    return dt.strftime("%d %b %Y %H:%M WIB")
+    """Format ISO datetime string to readable WIB format."""
+    try:
+        dt = datetime.fromisoformat(iso_str).astimezone(WIB)
+        return dt.strftime("%d %b %Y %H:%M WIB")
+    except (ValueError, AttributeError) as e:
+        print(f"Warning: Failed to format datetime {iso_str}: {e}")
+        return "Invalid date"
 
 
 def discord_ts_to_datetime_utc(ts: str) -> datetime:
-    return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc)
+    """Convert Discord timestamp to UTC datetime."""
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except (ValueError, AttributeError) as e:
+        print(f"Warning: Failed to parse Discord timestamp {ts}: {e}")
+        return datetime.now(timezone.utc)
 
 
-def extract_author(m: dict) -> tuple[str, str]:
-    author = m.get("author") or {}
-    return str(author.get("id", "")), author.get("username", "unknown")
+# ============================================================================
+# MESSAGE & AUTHOR UTILITIES
+# ============================================================================
+def extract_author(message: Dict) -> Tuple[str, str]:
+    """
+    Extract user_id and username from message author data.
+    Returns: (user_id, username)
+    """
+    author = message.get("author") or {}
+    user_id = str(author.get("id", ""))
+    username = author.get("username", "unknown")
+    return user_id, username
 
 
+# ============================================================================
+# QUEST DAY CALCULATIONS
+# ============================================================================
 def get_quest_days(start_wib: datetime, end_wib: datetime) -> int:
+    """Calculate number of days in quest period."""
     if end_wib <= start_wib:
         return 0
     delta = end_wib - start_wib
     return int(delta.total_seconds() // 86400)
 
 
-def day_window(start_wib: datetime, day_index: int) -> tuple[datetime, datetime]:
+def day_window(start_wib: datetime, day_index: int) -> Tuple[datetime, datetime]:
+    """Get the start and end time for a specific day in quest."""
     day_start = start_wib + timedelta(days=day_index - 1)
     day_end = start_wib + timedelta(days=day_index)
     return day_start, day_end
 
 
-def get_day_index_for_message(start_wib: datetime, end_wib: datetime, msg_time_utc: datetime) -> Optional[int]:
+def get_day_index_for_message(
+    start_wib: datetime, 
+    end_wib: datetime, 
+    msg_time_utc: datetime
+) -> Optional[int]:
+    """
+    Determine which day of the quest a message falls into.
+    Returns day index (1-indexed) or None if outside quest period.
+    """
     msg_wib = msg_time_utc.astimezone(WIB)
     if not (start_wib <= msg_wib < end_wib):
         return None
@@ -124,29 +176,48 @@ def get_day_index_for_message(start_wib: datetime, end_wib: datetime, msg_time_u
     return int(delta.total_seconds() // 86400) + 1
 
 
-def compute_streaks(total_days: int, day_map: dict[int, bool]) -> tuple[int, int]:
+# ============================================================================
+# STREAK CALCULATIONS
+# ============================================================================
+def compute_streaks(total_days: int, day_map: Dict[int, bool]) -> Tuple[int, int]:
+    """
+    Calculate current streak and max streak from day map.
+    Returns: (current_streak, max_streak)
+    """
     streak = 0
     max_streak = 0
 
+    # Calculate max streak
     for i in range(1, total_days + 1):
-        if day_map.get(i):
+        if day_map.get(i, False):
             streak += 1
             max_streak = max(max_streak, streak)
         else:
             streak = 0
 
+    # Calculate current streak (from end)
     current_streak = 0
     for i in range(total_days, 0, -1):
-        if day_map.get(i):
+        if day_map.get(i, False):
             current_streak += 1
         else:
             break
 
     return current_streak, max_streak
 
-async def discord_get(url: str, params: dict = None):
+
+# ============================================================================
+# DISCORD API HELPERS
+# ============================================================================
+def validate_discord_token() -> None:
+    """Validate that Discord token is configured."""
     if not DISCORD_BOT_TOKEN:
-        raise RuntimeError("DISCORD_BOT_TOKEN is missing.")
+        raise RuntimeError("DISCORD_BOT_TOKEN environment variable is not set")
+
+
+async def discord_get(url: str, params: Optional[Dict[str, str]] = None) -> Dict:
+    """Make GET request to Discord API."""
+    validate_discord_token()
 
     headers = {
         "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
@@ -159,9 +230,9 @@ async def discord_get(url: str, params: dict = None):
         return r.json()
 
 
-async def discord_put(url: str):
-    if not DISCORD_BOT_TOKEN:
-        raise RuntimeError("DISCORD_BOT_TOKEN is missing.")
+async def discord_put(url: str) -> httpx.Response:
+    """Make PUT request to Discord API."""
+    validate_discord_token()
 
     headers = {
         "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
@@ -173,34 +244,41 @@ async def discord_put(url: str):
         return r
 
 
-async def fetch_messages_in_window(channel_id: str, start_utc: datetime, end_utc: datetime) -> list[dict]:
+# ============================================================================
+# MESSAGE FETCHING
+# ============================================================================
+async def fetch_messages_in_window(
+    channel_id: str,
+    start_utc: datetime,
+    end_utc: datetime
+) -> List[Dict]:
     """
-    Fetch channel messages in [start_utc, end_utc)
+    Fetch channel messages in [start_utc, end_utc) window.
+    Handles pagination and rate limiting.
     """
-    if not DISCORD_BOT_TOKEN:
-        raise RuntimeError("DISCORD_BOT_TOKEN is missing.")
+    validate_discord_token()
 
     headers = {
         "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
         "User-Agent": "QuestTracker/1.0"
     }
 
-    all_msgs = []
-    before = None
+    all_msgs: List[Dict] = []
+    before: Optional[str] = None
 
     async with httpx.AsyncClient(timeout=30) as client:
         while True:
-            params = {"limit": "100"}
+            params: Dict[str, str] = {"limit": "100"}
             if before:
                 params["before"] = before
 
             url = f"{DISCORD_API_BASE}/channels/{channel_id}/messages"
             r = await client.get(url, headers=headers, params=params)
 
+            # Handle rate limiting
             if r.status_code == 429:
                 data = r.json()
                 retry_after = float(data.get("retry_after", 1.0))
-                import asyncio
                 await asyncio.sleep(retry_after)
                 continue
 
@@ -212,6 +290,7 @@ async def fetch_messages_in_window(channel_id: str, start_utc: datetime, end_utc
 
             all_msgs.extend(batch)
 
+            # Check if we've reached the start of the window
             oldest = batch[-1]
             oldest_dt = discord_ts_to_datetime_utc(oldest["timestamp"])
 
@@ -220,116 +299,168 @@ async def fetch_messages_in_window(channel_id: str, start_utc: datetime, end_utc
 
             before = oldest["id"]
 
+    # Filter messages to exact time window
     return [
         m for m in all_msgs
         if start_utc <= discord_ts_to_datetime_utc(m["timestamp"]) < end_utc
     ]
 
 
-def build_leaderboard(quest_id: int):
-    conn = db()
-    quest = conn.execute("SELECT * FROM quests WHERE id=?", (quest_id,)).fetchone()
-    if not quest:
-        conn.close()
-        return None, None, None
+# ============================================================================
+# LEADERBOARD BUILDING
+# ============================================================================
+def build_leaderboard(quest_id: int) -> Tuple[Optional[Dict], Optional[int], Optional[List[Dict]]]:
+    """
+    Build complete leaderboard for a quest.
+    Returns: (quest_data, total_days, leaderboard)
+    """
+    conn = get_db_connection()
+    
+    try:
+        quest = conn.execute(
+            "SELECT * FROM quests WHERE id=?", 
+            (quest_id,)
+        ).fetchone()
+        
+        if not quest:
+            return None, None, None
 
-    start_wib = datetime.fromisoformat(quest["start_wib"]).astimezone(WIB)
-    end_wib = datetime.fromisoformat(quest["end_wib"]).astimezone(WIB)
-    total_days = get_quest_days(start_wib, end_wib)
+        start_wib = datetime.fromisoformat(quest["start_wib"]).astimezone(WIB)
+        end_wib = datetime.fromisoformat(quest["end_wib"]).astimezone(WIB)
+        total_days = get_quest_days(start_wib, end_wib)
 
-    rows = conn.execute("""
-        SELECT user_id, username, day_index
-        FROM checkins
-        WHERE quest_id=?
-        ORDER BY username
-    """, (quest_id,)).fetchall()
-    conn.close()
+        # Fetch all checkins for this quest
+        rows = conn.execute("""
+            SELECT user_id, username, day_index
+            FROM checkins
+            WHERE quest_id=?
+            ORDER BY username
+        """, (quest_id,)).fetchall()
 
-    per_user = {}
-    for r in rows:
-        uid = r["user_id"]
-        if uid not in per_user:
-            per_user[uid] = {
-                "user_id": uid,
-                "username": r["username"],
-                "day_map": {}
-            }
-        per_user[uid]["day_map"][r["day_index"]] = True
-        per_user[uid]["username"] = r["username"]
+        # Build per-user data
+        per_user: Dict[str, Dict] = {}
+        for r in rows:
+            uid = r["user_id"]
+            if uid not in per_user:
+                per_user[uid] = {
+                    "user_id": uid,
+                    "username": r["username"],
+                    "day_map": {}
+                }
+            per_user[uid]["day_map"][r["day_index"]] = True
+            per_user[uid]["username"] = r["username"]
 
-    leaderboard = []
-    for u in per_user.values():
-        day_map = u["day_map"]
-        points = sum(1 for i in range(1, total_days + 1) if day_map.get(i))
-        current_streak, max_streak = compute_streaks(total_days, day_map)
-        leaderboard.append({
-            "user_id": u["user_id"],
-            "username": u["username"],
-            "points": points,
-            "current_streak": current_streak,
-            "max_streak": max_streak,
-            "grid": ["✅" if day_map.get(i) else "" for i in range(1, total_days + 1)]
-        })
+        # Build leaderboard entries - FIX: ensure all values are hashable
+        leaderboard: List[Dict] = []
+        for u in per_user.values():
+            day_map = u["day_map"]
+            points = sum(1 for i in range(1, total_days + 1) if day_map.get(i, False))
+            current_streak, max_streak = compute_streaks(total_days, day_map)
+            
+            # Create grid safely - ensure all values are strings
+            grid = [
+                "✅" if day_map.get(i, False) else "" 
+                for i in range(1, total_days + 1)
+            ]
+            
+            username_str = str(u["username"]).lower()
+            
+            leaderboard.append({
+                "user_id": str(u["user_id"]),
+                "username": str(u["username"]),
+                "points": int(points),
+                "current_streak": int(current_streak),
+                "max_streak": int(max_streak),
+                "grid": grid
+            })
 
-    leaderboard.sort(key=lambda x: (x["points"], x["max_streak"], x["username"].lower()), reverse=True)
-    return quest, total_days, leaderboard
+        # Sort by points, max_streak, then username (all are hashable types)
+        leaderboard.sort(
+            key=lambda x: (
+                -x["points"],  # negative for reverse sort
+                -x["max_streak"],
+                x["username_lower"] if "username_lower" in x else x["username"].lower()
+            )
+        )
+        
+        # Cleaner sort approach - create comparison key safely
+        leaderboard.sort(
+            key=lambda x: (-x["points"], -x["max_streak"], x["username"].lower())
+        )
+
+        return dict(quest), total_days, leaderboard
+        
+    finally:
+        close_db_connection(conn)
 
 
-async def fetch_assignable_roles():
-    roles = await discord_get(f"{DISCORD_API_BASE}/guilds/{GUILD_ID}/roles")
+# ============================================================================
+# DISCORD ROLES
+# ============================================================================
+async def fetch_assignable_roles() -> List[Dict]:
+    """Fetch list of assignable roles from Discord guild."""
+    try:
+        roles = await discord_get(f"{DISCORD_API_BASE}/guilds/{GUILD_ID}/roles")
+        
+        filtered: List[Dict] = []
+        for role in roles:
+            name = role.get("name", "")
+            if name == "@everyone":
+                continue
+            if role.get("managed", False):
+                continue
+            
+            filtered.append({
+                "id": str(role["id"]),
+                "name": str(name),
+                "position": int(role.get("position", 0))
+            })
 
-    filtered = []
-    for role in roles:
-        name = role.get("name", "")
-        if name == "@everyone":
-            continue
-        if role.get("managed"):
-            continue
-        filtered.append({
-            "id": str(role["id"]),
-            "name": name,
-            "position": role.get("position", 0)
-        })
-
-    filtered.sort(key=lambda x: x["position"], reverse=True)
-    return filtered
+        # Sort by position (descending)
+        filtered.sort(key=lambda x: x["position"], reverse=True)
+        return filtered
+        
+    except Exception as e:
+        print(f"Error fetching roles: {e}")
+        raise
 
 
+# ============================================================================
+# ROUTES: INDEX
+# ============================================================================
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
-    print("ROUTE HIT", flush=True)
+    """Display list of all quests."""
+    conn = get_db_connection()
+    
+    try:
+        quests = conn.execute(
+            "SELECT * FROM quests ORDER BY id DESC"
+        ).fetchall()
+        
+        quest_rows = []
+        for q in quests:
+            quest_rows.append({
+                "id": int(q["id"]),
+                "name": str(q["name"]),
+                "hashtag": str(q["hashtag"]),
+                "start_display": format_wib_display(q["start_wib"]),
+                "end_display": format_wib_display(q["end_wib"]),
+            })
 
-    conn = db()
-    quests = conn.execute("SELECT * FROM quests ORDER BY id DESC").fetchall()
-    conn.close()
-
-    print(f"TOTAL ROWS: {len(quests)}", flush=True)
-
-    quest_rows = []
-
-    for q in quests:
-        print("RAW ROW:", dict(q), flush=True)
-
-        quest_rows.append({
-            "id": q["id"],
-            "name": q["name"],
-            "hashtag": q["hashtag"],
-            "start_display": format_wib_display(q["start_wib"]),
-            "end_display": format_wib_display(q["end_wib"]),
+        return templates.TemplateResponse("index.html", {
+            "request": request,
+            "title": APP_TITLE,
+            "quests": quest_rows
         })
-
-    for q in quest_rows:
-        print("CLEAN ROW:", q, flush=True)
-        print("TYPE NAME:", type(q["name"]), q["name"], flush=True)
-        print("TYPE HASHTAG:", type(q["hashtag"]), q["hashtag"], flush=True)
-
-    return templates.TemplateResponse("index.html", {
-        "request": request,
-        "title": APP_TITLE,
-        "quests": quest_rows
-    })
+        
+    finally:
+        close_db_connection(conn)
 
 
+# ============================================================================
+# ROUTES: CREATE QUEST
+# ============================================================================
 @app.post("/quest/create")
 def create_quest(
     name: str = Form(...),
@@ -337,38 +468,50 @@ def create_quest(
     start_wib: str = Form(...),
     end_wib: str = Form(...),
 ):
+    """Create a new quest."""
     s = parse_wib_datetime(start_wib)
     e = parse_wib_datetime(end_wib)
 
+    # Auto-extend if end is before start
     if e <= s:
         e = s + timedelta(days=7)
 
-    conn = db()
-    conn.execute("""
-        INSERT INTO quests(name, hashtag, start_wib, end_wib, created_at_utc)
-        VALUES(?,?,?,?,?)
-    """, (
-        name.strip(),
-        hashtag.strip(),
-        s.isoformat(),
-        e.isoformat(),
-        datetime.now(timezone.utc).isoformat()
-    ))
-    conn.commit()
-    qid = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-    conn.close()
+    conn = get_db_connection()
+    
+    try:
+        conn.execute("""
+            INSERT INTO quests(name, hashtag, start_wib, end_wib, created_at_utc)
+            VALUES(?,?,?,?,?)
+        """, (
+            name.strip(),
+            hashtag.strip(),
+            s.isoformat(),
+            e.isoformat(),
+            datetime.now(timezone.utc).isoformat()
+        ))
+        conn.commit()
+        
+        qid = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        
+        return RedirectResponse(url=f"/quest/{qid}", status_code=303)
+        
+    finally:
+        close_db_connection(conn)
 
-    return RedirectResponse(url=f"/quest/{qid}", status_code=303)
 
-
+# ============================================================================
+# ROUTES: VIEW QUEST
+# ============================================================================
 @app.get("/quest/{quest_id}", response_class=HTMLResponse)
 async def view_quest(request: Request, quest_id: int):
+    """Display quest details and leaderboard."""
     quest, total_days, leaderboard = build_leaderboard(quest_id)
     if not quest:
         return HTMLResponse("Quest not found", status_code=404)
 
-    roles = []
-    role_error = None
+    roles: List[Dict] = []
+    role_error: Optional[str] = None
+    
     try:
         roles = await fetch_assignable_roles()
     except Exception as e:
@@ -392,69 +535,98 @@ async def view_quest(request: Request, quest_id: int):
     })
 
 
+# ============================================================================
+# ROUTES: SYNC QUEST
+# ============================================================================
 @app.post("/quest/{quest_id}/sync")
 async def sync_quest(quest_id: int):
-    conn = db()
-    quest = conn.execute("SELECT * FROM quests WHERE id=?", (quest_id,)).fetchone()
-    if not quest:
-        conn.close()
-        return HTMLResponse("Quest not found", status_code=404)
+    """Sync quest data from Discord messages."""
+    conn = get_db_connection()
+    
+    try:
+        quest = conn.execute(
+            "SELECT * FROM quests WHERE id=?", 
+            (quest_id,)
+        ).fetchone()
+        
+        if not quest:
+            return HTMLResponse("Quest not found", status_code=404)
 
-    start_wib = datetime.fromisoformat(quest["start_wib"]).astimezone(WIB)
-    end_wib = datetime.fromisoformat(quest["end_wib"]).astimezone(WIB)
-    hashtag = quest["hashtag"]
-    conn.close()
+        start_wib = datetime.fromisoformat(quest["start_wib"]).astimezone(WIB)
+        end_wib = datetime.fromisoformat(quest["end_wib"]).astimezone(WIB)
+        hashtag = str(quest["hashtag"])
+        
+    finally:
+        close_db_connection(conn)
 
+    # Fetch messages from Discord
     start_utc = start_wib.astimezone(timezone.utc)
     end_utc = end_wib.astimezone(timezone.utc)
 
     msgs = await fetch_messages_in_window(CHANNEL_ID, start_utc, end_utc)
     msgs.sort(key=lambda m: m["timestamp"])
 
-    conn = db()
-    for m in msgs:
-        if m.get("type") not in (0, 19):
-            continue
-        if m.get("author", {}).get("bot"):
-            continue
+    # Process messages and insert into database
+    conn = get_db_connection()
+    
+    try:
+        for m in msgs:
+            # Filter message type
+            if m.get("type") not in (0, 19):
+                continue
+            
+            # Skip bot messages
+            if m.get("author", {}).get("bot", False):
+                continue
 
-        content = (m.get("content") or "").strip()
-        if hashtag.lower() not in content.lower():
-            continue
+            # Check for hashtag
+            content = (m.get("content") or "").strip()
+            if hashtag.lower() not in content.lower():
+                continue
 
-        user_id, username = extract_author(m)
-        if not user_id:
-            continue
+            # Extract author
+            user_id, username = extract_author(m)
+            if not user_id:
+                continue
 
-        msg_time_utc = discord_ts_to_datetime_utc(m["timestamp"])
-        day_index = get_day_index_for_message(start_wib, end_wib, msg_time_utc)
-        if day_index is None:
-            continue
+            # Determine day index
+            msg_time_utc = discord_ts_to_datetime_utc(m["timestamp"])
+            day_index = get_day_index_for_message(start_wib, end_wib, msg_time_utc)
+            if day_index is None:
+                continue
 
-        try:
-            conn.execute("""
-                INSERT INTO checkins(quest_id, user_id, username, day_index, message_id, message_time_utc, content)
-                VALUES(?,?,?,?,?,?,?)
-            """, (
-                quest_id,
-                user_id,
-                username,
-                day_index,
-                str(m["id"]),
-                msg_time_utc.isoformat(),
-                content
-            ))
-        except sqlite3.IntegrityError:
-            pass
+            # Insert checkin (ignore duplicates)
+            try:
+                conn.execute("""
+                    INSERT INTO checkins(quest_id, user_id, username, day_index, message_id, message_time_utc, content)
+                    VALUES(?,?,?,?,?,?,?)
+                """, (
+                    quest_id,
+                    user_id,
+                    username,
+                    day_index,
+                    str(m["id"]),
+                    msg_time_utc.isoformat(),
+                    content
+                ))
+            except sqlite3.IntegrityError:
+                # Duplicate entry, skip
+                pass
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+        
+    finally:
+        close_db_connection(conn)
 
     return RedirectResponse(url=f"/quest/{quest_id}", status_code=303)
 
 
+# ============================================================================
+# ROUTES: EXPORT CSV
+# ============================================================================
 @app.get("/quest/{quest_id}/export.csv")
 def export_csv(quest_id: int):
+    """Export quest leaderboard as CSV."""
     quest, total_days, leaderboard = build_leaderboard(quest_id)
     if not quest:
         return HTMLResponse("Quest not found", status_code=404)
@@ -462,9 +634,11 @@ def export_csv(quest_id: int):
     out = StringIO()
     writer = csv.writer(out)
 
+    # Write header
     day_headers = [f"Day {i}" for i in range(1, total_days + 1)]
     writer.writerow(["User ID", "Username"] + day_headers + ["Total Points", "Current Streak", "Max Streak"])
 
+    # Write data rows
     for row in leaderboard:
         writer.writerow([
             row["user_id"],
@@ -484,37 +658,62 @@ def export_csv(quest_id: int):
     )
 
 
+# ============================================================================
+# ROUTES: CLEAR SYNC
+# ============================================================================
 @app.post("/quest/{quest_id}/clear-sync")
 def clear_sync_data(quest_id: int):
-    conn = db()
-    quest = conn.execute("SELECT id FROM quests WHERE id=?", (quest_id,)).fetchone()
-    if not quest:
-        conn.close()
-        return HTMLResponse("Quest not found", status_code=404)
+    """Clear all sync data for a quest."""
+    conn = get_db_connection()
+    
+    try:
+        quest = conn.execute(
+            "SELECT id FROM quests WHERE id=?", 
+            (quest_id,)
+        ).fetchone()
+        
+        if not quest:
+            return HTMLResponse("Quest not found", status_code=404)
 
-    conn.execute("DELETE FROM checkins WHERE quest_id=?", (quest_id,))
-    conn.commit()
-    conn.close()
+        conn.execute("DELETE FROM checkins WHERE quest_id=?", (quest_id,))
+        conn.commit()
+        
+    finally:
+        close_db_connection(conn)
 
     return RedirectResponse(url=f"/quest/{quest_id}", status_code=303)
 
 
+# ============================================================================
+# ROUTES: DELETE QUEST
+# ============================================================================
 @app.post("/quest/{quest_id}/delete")
 def delete_quest(quest_id: int):
-    conn = db()
-    quest = conn.execute("SELECT id FROM quests WHERE id=?", (quest_id,)).fetchone()
-    if not quest:
-        conn.close()
-        return HTMLResponse("Quest not found", status_code=404)
+    """Delete a quest and all associated data."""
+    conn = get_db_connection()
+    
+    try:
+        quest = conn.execute(
+            "SELECT id FROM quests WHERE id=?", 
+            (quest_id,)
+        ).fetchone()
+        
+        if not quest:
+            return HTMLResponse("Quest not found", status_code=404)
 
-    conn.execute("DELETE FROM checkins WHERE quest_id=?", (quest_id,))
-    conn.execute("DELETE FROM quests WHERE id=?", (quest_id,))
-    conn.commit()
-    conn.close()
+        conn.execute("DELETE FROM checkins WHERE quest_id=?", (quest_id,))
+        conn.execute("DELETE FROM quests WHERE id=?", (quest_id,))
+        conn.commit()
+        
+    finally:
+        close_db_connection(conn)
 
     return RedirectResponse(url="/", status_code=303)
 
 
+# ============================================================================
+# ROUTES: ASSIGN ROLE
+# ============================================================================
 @app.post("/quest/{quest_id}/assign-role", response_class=HTMLResponse)
 async def assign_role(
     request: Request,
@@ -522,22 +721,26 @@ async def assign_role(
     role_id: str = Form(...),
     min_points: int = Form(1)
 ):
+    """Assign Discord role to eligible quest participants."""
     quest, total_days, leaderboard = build_leaderboard(quest_id)
     if not quest:
         return HTMLResponse("Quest not found", status_code=404)
 
-    roles = []
-    role_error = None
+    roles: List[Dict] = []
+    role_error: Optional[str] = None
+    
     try:
         roles = await fetch_assignable_roles()
     except Exception as e:
         role_error = str(e)
 
+    # Filter eligible users
     eligible = [u for u in leaderboard if u["points"] >= min_points]
 
     success_count = 0
-    failed = []
+    failed: List[Dict] = []
 
+    # Assign role to each eligible user
     for user in eligible:
         url = f"{DISCORD_API_BASE}/guilds/{GUILD_ID}/members/{user['user_id']}/roles/{role_id}"
         try:
@@ -557,6 +760,7 @@ async def assign_role(
                 "reason": str(e)
             })
 
+    # Build summary
     assign_summary = {
         "role_id": role_id,
         "min_points": min_points,
