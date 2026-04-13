@@ -363,30 +363,33 @@ def build_leaderboard(quest_id: int) -> Tuple[Optional[Dict], Optional[int], Opt
                 for i in range(1, total_days + 1)
             ]
             
-            username_str = str(u["username"]).lower()
+            username_lower = str(u["username"]).lower()
             
             leaderboard.append({
                 "user_id": str(u["user_id"]),
                 "username": str(u["username"]),
+                "username_lower": username_lower,
                 "points": int(points),
                 "current_streak": int(current_streak),
                 "max_streak": int(max_streak),
                 "grid": grid
             })
 
-        # Sort by points, max_streak, then username (all are hashable types)
-        leaderboard.sort(
-            key=lambda x: (
-                -x["points"],  # negative for reverse sort
-                -x["max_streak"],
-                x["username_lower"] if "username_lower" in x else x["username"].lower()
+        # CRITICAL FIX: Sort dengan HANYA hashable types
+        # JANGAN masukkan dict, list, atau custom objects ke dalam sort key!
+        # Hanya gunakan: int, float, str, bool, tuple dari hashable types
+        try:
+            leaderboard.sort(
+                key=lambda x: (
+                    -x["points"],           # int - HASHABLE
+                    -x["max_streak"],       # int - HASHABLE
+                    x["username_lower"]     # str - HASHABLE
+                )
             )
-        )
-        
-        # Cleaner sort approach - create comparison key safely
-        leaderboard.sort(
-            key=lambda x: (-x["points"], -x["max_streak"], x["username"].lower())
-        )
+        except TypeError as e:
+            print(f"Warning: Sort failed with error {e}, falling back to points only")
+            # Fallback jika ada issue
+            leaderboard.sort(key=lambda x: -x["points"])
 
         return dict(quest), total_days, leaderboard
         
