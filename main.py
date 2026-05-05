@@ -8,9 +8,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List, Tuple
 
 import httpx
-from fastapi import FastAPI, Request, Form
+from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
+from starlette.requests import Request
 
 # ============================================================================
 # CONSTANTS
@@ -431,9 +432,8 @@ async def fetch_assignable_roles() -> List[Dict]:
 # ============================================================================
 # ROUTES: INDEX
 # ============================================================================
-@app.get("/", response_class=HTMLResponse)
+@app.get("/")
 def index(request: Request):
-    """Display list of all quests."""
     conn = get_db_connection()
     
     try:
@@ -451,11 +451,17 @@ def index(request: Request):
                 "end_display": format_wib_display(q["end_wib"]),
             })
 
-        return templates.TemplateResponse("index.html", {
-            "request": request,
-            "title": APP_TITLE,
-            "quests": quest_rows
-        })
+        # 🔥 TAMBAHKAN DI SINI
+        print("DEBUG templates:", type(templates))
+
+        return templates.TemplateResponse(
+            request,
+            "index.html",
+            {
+                "title": APP_TITLE,
+                "quests": quest_rows
+            }
+        )
         
     finally:
         close_db_connection(conn)

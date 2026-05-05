@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  quest-tracker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: quest-tracker
+    ports:
+      - "8000:8000"
+    environment:
+      DISCORD_BOT_TOKEN: "${DISCORD_BOT_TOKEN}"
+      QUEST_DB_PATH: "/app/data/quest_tracker.db"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - quest_data:/app/data
+      - ./templates:/app/templates:ro
+      - ./main.py:/app/main.py:ro
+    restart: always
+    networks:
+      - quest-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  quest_data:
+    driver: local
+
+networks:
+  quest-network:
+    driver: bridge
