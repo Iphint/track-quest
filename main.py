@@ -12,6 +12,9 @@ from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ============================================================================
 # CONSTANTS
@@ -455,9 +458,9 @@ def index(request: Request):
         print("DEBUG templates:", type(templates))
 
         return templates.TemplateResponse(
-            request,
-            "index.html",
-            {
+            request=request,
+            name="index.html",
+            context={
                 "title": APP_TITLE,
                 "quests": quest_rows
             }
@@ -514,34 +517,66 @@ def create_quest(
 @app.get("/quest/{quest_id}", response_class=HTMLResponse)
 async def view_quest(request: Request, quest_id: int):
     """Display quest details and leaderboard."""
+
     quest, total_days, leaderboard = build_leaderboard(quest_id)
+
     if not quest:
         return HTMLResponse("Quest not found", status_code=404)
 
     roles: List[Dict] = []
     role_error: Optional[str] = None
-    
+
     try:
         roles = await fetch_assignable_roles()
+
+        # ensure pure python dict
+        roles = [
+            {
+                "id": str(role.get("id", "")),
+                "name": str(role.get("name", "")),
+                "position": int(role.get("position", 0))
+            }
+            for role in roles
+        ]
+
     except Exception as e:
         role_error = str(e)
 
-    return templates.TemplateResponse("quest.html", {
-        "request": request,
-        "title": f"{APP_TITLE} - {quest['name']}",
-        "quest": {
-            "id": quest["id"],
-            "name": quest["name"],
-            "hashtag": quest["hashtag"],
-            "start_display": format_wib_display(quest["start_wib"]),
-            "end_display": format_wib_display(quest["end_wib"]),
-        },
-        "total_days": total_days,
-        "leaderboard": leaderboard,
-        "roles": roles,
-        "role_error": role_error,
-        "assign_summary": None
-    })
+    # ensure leaderboard pure python dict
+    safe_leaderboard = []
+
+    for row in leaderboard:
+        safe_leaderboard.append({
+            "user_id": str(row.get("user_id", "")),
+            "username": str(row.get("username", "")),
+            "username_lower": str(row.get("username_lower", "")),
+            "points": int(row.get("points", 0)),
+            "current_streak": int(row.get("current_streak", 0)),
+            "max_streak": int(row.get("max_streak", 0)),
+            "grid": list(row.get("grid", []))
+        })
+
+    safe_quest = {
+        "id": int(quest["id"]),
+        "name": str(quest["name"]),
+        "hashtag": str(quest["hashtag"]),
+        "start_display": format_wib_display(quest["start_wib"]),
+        "end_display": format_wib_display(quest["end_wib"]),
+    }
+
+    return templates.TemplateResponse(
+        request=request,
+        name="quest.html",
+        context={
+            "title": f"{APP_TITLE} - {safe_quest['name']}",
+            "quest": safe_quest,
+            "total_days": int(total_days),
+            "leaderboard": safe_leaderboard,
+            "roles": roles,
+            "role_error": role_error,
+            "assign_summary": None
+        }
+    )
 
 
 # ============================================================================
@@ -779,8 +814,10 @@ async def assign_role(
         "failed": failed[:20]
     }
 
-    return templates.TemplateResponse("quest.html", {
-        "request": request,
+    return templates.TemplateResponse(
+    request=request,
+    name="quest.html",
+    context={
         "title": f"{APP_TITLE} - {quest['name']}",
         "quest": {
             "id": quest["id"],
@@ -794,4 +831,5 @@ async def assign_role(
         "roles": roles,
         "role_error": role_error,
         "assign_summary": assign_summary
-    })
+    }
+)
